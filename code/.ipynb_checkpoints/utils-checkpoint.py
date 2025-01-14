@@ -15,8 +15,7 @@ from xgboost import XGBClassifier
 from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
 
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from sklearn.metrics import matthews_corrcoef, mean_absolute_error, mean_squared_error
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, matthews_corrcoef
 
 from imblearn.over_sampling import SMOTE
 
@@ -217,9 +216,12 @@ def fairness_study(model_name, X, y, protected, priv, unpriv):
         for j in range(2):
             # Get metrics in a string format combining both mean and std and store them in results
             metrics[j] = get_formatted_metrics(metrics[j])
-            results.append([protected[i], j, *metrics[j]])
+            
+            # Determine group
+            group = "Privileged" if j else "Unprivileged"
+            results.append([protected[i], group, *metrics[j]])
         
-    return pd.DataFrame(results, columns=["Attribute", "Privileged?", "Accuracy", "Precision", "Recall", "F1-Score", "MCC"])
+    return pd.DataFrame(results, columns=["Attribute", "Group", "Accuracy", "Precision", "Recall", "F1-Score", "MCC"])
 
 
 # Custom SHAP bar plot for top n features
@@ -236,8 +238,7 @@ def top_features(model_name, X, y, top_n=10):
     X_test = pd.DataFrame(X_test, columns=X.columns)
 
     # Train the model
-    model = get_model(model_name)
-    model.fit(X_train, y_train)
+    model = get_model(model_name).fit(X_train, y_train)
 
     # Use different explainers depending on the model
     if model_name in ["Logistic Regression", "SVM", "K-Nearest Neighbors"]:
@@ -255,7 +256,7 @@ def top_features(model_name, X, y, top_n=10):
     }).sort_values(by='Mean', ascending=False).head(top_n)
 
     # Plot
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(8, 6))
     plt.barh(feature_importance['Feature'][::-1], feature_importance['Mean'][::-1], color='royalblue')
     plt.xlabel('Mean Absolute SHAP Value')
     plt.ylabel('Feature')
@@ -266,7 +267,7 @@ def top_features(model_name, X, y, top_n=10):
 
 
 # Predict the lifetime of an event
-def predict_lifetime(data, labels, duration, event):
+def predict_lifetime(data, labels, duration, event, n_bins=20):
     # Scale the data
     scaled_data = StandardScaler().fit_transform(data)
     
@@ -286,17 +287,28 @@ def predict_lifetime(data, labels, duration, event):
     filtered_actual_times = labels[duration][event_occurred_mask]
     filtered_predicted_times = pred_time[event_occurred_mask]
     
-    # Compute and print metrics for filtered data
-    mae = mean_absolute_error(filtered_actual_times, filtered_predicted_times)
-    rmse = np.sqrt(mean_squared_error(filtered_actual_times, filtered_predicted_times))
-    print(f"Mean Absolute Error (MAE) for instances where event occurred: {mae}")
-    print(f"Root Mean Squared Error (RMSE) for instances where event occurred: {rmse}")
+    # Create calibration data by binning predicted times
+    bins = np.linspace(filtered_predicted_times.min(), filtered_predicted_times.max(), n_bins + 1)
+    bin_centers = (bins[:-1] + bins[1:]) / 2  # Compute bin centers
+
+    # Initialize empty lists for the next loop
+    actual_means = []
+    predicted_means = []
     
-    # Scatter plot of predicted vs actual survival times (only for events that occurred)
+    for i in range(n_bins):
+        # Select predictions and actuals in the current bin
+        bin_mask = (filtered_predicted_times >= bins[i]) & (filtered_predicted_times < bins[i+1])
+        if bin_mask.sum() > 0:  # Avoid empty bins
+            actual_means.append(filtered_actual_times[bin_mask].mean())
+            predicted_means.append(filtered_predicted_times[bin_mask].mean())
+    
+    # Calibration plot
     plt.figure(figsize=(8, 6))
-    plt.scatter(filtered_actual_times, filtered_predicted_times, color='blue', alpha=0.5)
-    plt.plot([0, max(filtered_actual_times)], [0, max(filtered_predicted_times)], color='red', linestyle='--')
-    plt.xlabel('Actual Survival Time (Event Occurred)')
-    plt.ylabel('Predicted Survival Time (Event Occurred)')
-    plt.title('Actual vs Predicted Survival Time (Event Occurred)')
+    plt.plot(bin_centers, bin_centers, color='red', linestyle='--', label='Perfect Calibration')
+    plt.scatter(predicted_means, actual_means, color='blue', alpha=0.8, label='Calibration Points')
+    plt.xlabel('Mean Predicted Survival Time')
+    plt.ylabel('Mean Actual Survival Time')
+    plt.title('Calibration Plot for Predicted vs Actual Survival Time')
+    plt.legend()
+    plt.grid(alpha=0.3)
     plt.show()
